@@ -7,6 +7,8 @@ struct ORIGINAL
 {
 	HANDLE hHeap;
 	UINT CodePage;
+	BYTE CharSet;
+	BOOL IsDBCS;
 	char DllPath[MAX_PATH];
 	const char* lpDefaultChar = "";
 	BOOL lpUsedDefaultChar = TRUE;
@@ -61,6 +63,7 @@ HWND WINAPI HookCreateWindowExA(
 	int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam);
 
 LRESULT WINAPI HookSendMessageA(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+int WINAPI HookGetSystemMetrics(_In_ int nIndex);
 //LRESULT WINAPI HookCallWindowProcA(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 int WINAPI HookMultiByteToWideChar(UINT CodePage, DWORD dwFlags,
 	LPCSTR lpMultiByteStr, int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar);

@@ -291,6 +291,10 @@ static LRESULT(WINAPI* OriginalDefWindowProcA)(
 	_In_ LPARAM lParam
 	) = DefWindowProcA;
 
+static int(WINAPI* OriginalGetSystemMetrics)(
+	_In_ int nIndex
+	) = GetSystemMetrics;
+
 static LCID(WINAPI* OriginalGetThreadLocale)() = GetThreadLocale;
 static LANGID(WINAPI* OriginalGetSystemDefaultUILanguage)() = GetSystemDefaultUILanguage;
 static LANGID(WINAPI* OriginalGetUserDefaultUILanguage)() = GetUserDefaultUILanguage;

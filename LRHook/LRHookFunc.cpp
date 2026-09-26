@@ -152,6 +152,16 @@ int WideCharToMultiByteTruncate(LPCWSTR wstr, int wsize, LPSTR lstr, int lsize)
 	return n;
 }
 
+// Delphi/VCL and most ANSI programs create fonts with DEFAULT_CHARSET, which GDI resolves
+// with the real system locale, so TextOutA/ExtTextOutA decode with the wrong code page.
+// On a real CJK system, font association also makes ANSI_CHARSET fonts DBCS-aware.
+static inline BYTE FixCharSet(BYTE CharSet)
+{
+	if (CharSet == DEFAULT_CHARSET || (CharSet == ANSI_CHARSET && Original.IsDBCS))
+		return Original.CharSet;
+	return CharSet;
+}
+
 // user32 (A<->W window proc thunks, CallWindowProcA, DefWindowProcA, menus...) converts
 // through these ntdll exports with the real system code page, bypassing the kernel32 hooks.
 // Locale Emulator swaps ntdll's NLS tables instead, but RtlResetRtlTranslations is a stub
@@ -289,6 +299,7 @@ void AttachFunctions()
 	DetourAttach(&(PVOID&)OriginalCharNextExA, HookCharNextExA);
 	DetourAttach(&(PVOID&)OriginalIsDBCSLeadByteEx, HookIsDBCSLeadByteEx);
 	DetourAttach(&(PVOID&)OriginalSendMessageA, HookSendMessageA);
+	DetourAttach(&(PVOID&)OriginalGetSystemMetrics, HookGetSystemMetrics);
 	
 	//DetourAttach(&(PVOID&)OriginalNtCreateUserProcess, HookNtCreateUserProcess);
 #ifdef _WIN64
@@ -339,6 +350,11 @@ void AttachFunctions()
 		DetourAttach(&(PVOID&)OriginalRegisterClassExA, HookRegisterClassExA);*/
 	}
 	
+	CHARSETINFO csi;
+	Original.CharSet = TranslateCharsetInfo((DWORD*)(ULONG_PTR)settings.CodePage, &csi, TCI_SRCCODEPAGE)
+		? (BYTE)csi.ciCharset : DEFAULT_CHARSET;
+	CPINFO cpi;
+	Original.IsDBCS = OriginalGetCPInfo(settings.CodePage, &cpi) && cpi.MaxCharSize > 1;
 	if (settings.HookIME)
 	{
 		if (Original.CodePage == 936 && (settings.CodePage == 932 || settings.CodePage == 950))
@@ -388,6 +404,7 @@ void DetachFunctions()
 	DetourDetach(&(PVOID&)OriginalCharNextExA, HookCharNextExA);
 	DetourDetach(&(PVOID&)OriginalIsDBCSLeadByteEx, HookIsDBCSLeadByteEx);
 	DetourDetach(&(PVOID&)OriginalSendMessageA, HookSendMessageA);
+	DetourDetach(&(PVOID&)OriginalGetSystemMetrics, HookGetSystemMetrics);
 	
 	DetourDetach(&(PVOID&)OriginalWinExec, HookWinExec);
 	DetourDetach(&(PVOID&)OriginalCreateProcessA, HookCreateProcessA);
@@ -622,6 +639,14 @@ LRESULT WINAPI HookSendMessageA(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 	}	break;
 	}
 	return OriginalSendMessageA(hWnd, uMsg, wParam, lParam);
+}
+
+// Delphi's SysLocale.FarEast/LeadBytes and other DBCS-aware code key off this
+int WINAPI HookGetSystemMetrics(_In_ int nIndex)
+{
+	if (nIndex == SM_DBCSENABLED)
+		return Original.IsDBCS;
+	return OriginalGetSystemMetrics(nIndex);
 }
 
 int WINAPI HookMultiByteToWideChar(UINT CodePage, DWORD dwFlags,
@@ -1087,7 +1112,6 @@ HFONT WINAPI HookCreateFontW(
 	_In_opt_ LPCWSTR pszFaceName
 )
 {
-	//iCharSet = HANGUL_CHARSET;
 	return OriginalCreateFontW(
 		cHeight,
 		cWidth,
@@ -1097,7 +1121,7 @@ HFONT WINAPI HookCreateFontW(
 		bItalic,
 		bUnderline,
 		bStrikeOut,
-		iCharSet,
+		FixCharSet((BYTE)iCharSet),
 		iOutPrecision,
 		iClipPrecision,
 		iQuality,
@@ -1116,8 +1140,8 @@ HFONT WINAPI HookCreateFontIndirectA(
 	/*if (strcmp(settings.lfFaceName, "None") != 0)
 		strcpy(lplf->lfFaceName, settings.lfFaceName);
 	return OriginalCreateFontIndirectA(lplf);*/
-	LOGFONTW logfont = { sizeof(LOGFONTW), };
-	memcpy(&logfont, lplf, sizeof(LOGFONTW));
+	LOGFONTW logfont = { 0 };
+	memcpy(&logfont, lplf, FIELD_OFFSET(LOGFONTA, lfFaceName));
 	MultiByteToWideChar(settings.CodePage, 0, lplf->lfFaceName, -1, logfont.lfFaceName, LF_FACESIZE);
 	return CreateFontIndirectW(&logfont);
 }
@@ -1126,8 +1150,11 @@ HFONT WINAPI HookCreateFontIndirectW(
 	LOGFONTW* lplf
 )
 {
-	//lplf->lfCharSet = HANGUL_CHARSET;
-	return OriginalCreateFontIndirectW(lplf);
+	if (!lplf)
+		return OriginalCreateFontIndirectW(lplf);
+	LOGFONTW logfont = *lplf;
+	logfont.lfCharSet = FixCharSet(logfont.lfCharSet);
+	return OriginalCreateFontIndirectW(&logfont);
 }
 
 HFONT WINAPI HookCreateFontIndirectExA(
@@ -1137,6 +1164,7 @@ HFONT WINAPI HookCreateFontIndirectExA(
 	ENUMLOGFONTEXDVW lplfW = { sizeof(ENUMLOGFONTEXDVW), };
 	memcpy(&lplfW, lplf, sizeof(ENUMLOGFONTEXDVW));
 	MultiByteToWideChar(settings.CodePage, 0, lplf->elfEnumLogfontEx.elfLogFont.lfFaceName, -1, lplfW.elfEnumLogfontEx.elfLogFont.lfFaceName, LF_FACESIZE);
+	lplfW.elfEnumLogfontEx.elfLogFont.lfCharSet = FixCharSet(lplfW.elfEnumLogfontEx.elfLogFont.lfCharSet);
 	return OriginalCreateFontIndirectExW(&lplfW);
 }
 
@@ -1144,8 +1172,12 @@ HFONT WINAPI HookCreateFontIndirectExW(
 	ENUMLOGFONTEXDVW* lplf
 )
 {
-	//lplf->elfEnumLogfontEx.elfLogFont.lfCharSet = HANGUL_CHARSET;
-	return OriginalCreateFontIndirectExW(lplf);
+	if (!lplf || FixCharSet(lplf->elfEnumLogfontEx.elfLogFont.lfCharSet) == lplf->elfEnumLogfontEx.elfLogFont.lfCharSet)
+		return OriginalCreateFontIndirectExW(lplf);
+	ENUMLOGFONTEXDVW logfont;
+	memcpy(&logfont, lplf, FIELD_OFFSET(ENUMLOGFONTEXDVW, elfDesignVector.dvValues) + lplf->elfDesignVector.dvNumAxes * sizeof(LONG));
+	logfont.elfEnumLogfontEx.elfLogFont.lfCharSet = FixCharSet(logfont.elfEnumLogfontEx.elfLogFont.lfCharSet);
+	return OriginalCreateFontIndirectExW(&logfont);
 }
 
 BOOL WINAPI HookTextOutA(
