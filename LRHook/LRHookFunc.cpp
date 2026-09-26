@@ -152,8 +152,90 @@ int WideCharToMultiByteTruncate(LPCWSTR wstr, int wsize, LPSTR lstr, int lsize)
 	return n;
 }
 
-void AttachFunctions() 
+// user32 (A<->W window proc thunks, CallWindowProcA, DefWindowProcA, menus...) converts
+// through these ntdll exports with the real system code page, bypassing the kernel32 hooks.
+// Locale Emulator swaps ntdll's NLS tables instead, but RtlResetRtlTranslations is a stub
+// on current Windows 11 builds.
+typedef LONG(NTAPI* RtlMultiByteToUnicodeNFn)(PWCH, ULONG, PULONG, const CHAR*, ULONG);
+typedef LONG(NTAPI* RtlUnicodeToMultiByteNFn)(PCHAR, ULONG, PULONG, PCWCH, ULONG);
+typedef LONG(NTAPI* RtlMultiByteToUnicodeSizeFn)(PULONG, const CHAR*, ULONG);
+typedef LONG(NTAPI* RtlUnicodeToMultiByteSizeFn)(PULONG, PCWCH, ULONG);
+static RtlMultiByteToUnicodeNFn OriginalRtlMultiByteToUnicodeN = (RtlMultiByteToUnicodeNFn)DetourFindFunction("ntdll.dll", "RtlMultiByteToUnicodeN");
+static RtlUnicodeToMultiByteNFn OriginalRtlUnicodeToMultiByteN = (RtlUnicodeToMultiByteNFn)DetourFindFunction("ntdll.dll", "RtlUnicodeToMultiByteN");
+static RtlMultiByteToUnicodeSizeFn OriginalRtlMultiByteToUnicodeSize = (RtlMultiByteToUnicodeSizeFn)DetourFindFunction("ntdll.dll", "RtlMultiByteToUnicodeSize");
+static RtlUnicodeToMultiByteSizeFn OriginalRtlUnicodeToMultiByteSize = (RtlUnicodeToMultiByteSizeFn)DetourFindFunction("ntdll.dll", "RtlUnicodeToMultiByteSize");
+
+LONG NTAPI HookRtlMultiByteToUnicodeN(PWCH UnicodeString, ULONG MaxBytesInUnicodeString, PULONG BytesInUnicodeString,
+	const CHAR* MultiByteString, ULONG BytesInMultiByteString)
 {
+	DWORD LastError = GetLastError();
+	int MaxChars = MaxBytesInUnicodeString / sizeof(WCHAR);
+	int n = 0;
+	if (BytesInMultiByteString && MaxChars)
+	{
+		n = OriginalMultiByteToWideChar(settings.CodePage, 0, MultiByteString, BytesInMultiByteString, UnicodeString, MaxChars);
+		if (n == 0 && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+		{
+			// Rtl semantics: fill what fits instead of failing
+			int Needed = OriginalMultiByteToWideChar(settings.CodePage, 0, MultiByteString, BytesInMultiByteString, NULL, 0);
+			LPWSTR Buffer = (LPWSTR)HeapAlloc(Original.hHeap, 0, Needed * sizeof(WCHAR));
+			if (Buffer)
+			{
+				OriginalMultiByteToWideChar(settings.CodePage, 0, MultiByteString, BytesInMultiByteString, Buffer, Needed);
+				memcpy(UnicodeString, Buffer, MaxChars * sizeof(WCHAR));
+				HeapFree(Original.hHeap, 0, Buffer);
+				n = MaxChars;
+			}
+		}
+	}
+	if (BytesInUnicodeString)
+		*BytesInUnicodeString = n * sizeof(WCHAR);
+	SetLastError(LastError);
+	return 0;
+}
+
+LONG NTAPI HookRtlUnicodeToMultiByteN(PCHAR MultiByteString, ULONG MaxBytesInMultiByteString, PULONG BytesInMultiByteString,
+	PCWCH UnicodeString, ULONG BytesInUnicodeString)
+{
+	DWORD LastError = GetLastError();
+	int Chars = BytesInUnicodeString / sizeof(WCHAR);
+	int n = 0;
+	if (Chars && MaxBytesInMultiByteString)
+	{
+		n = WideCharToMultiByteTruncate(UnicodeString, Chars, MultiByteString, MaxBytesInMultiByteString);
+	}
+	if (BytesInMultiByteString)
+		*BytesInMultiByteString = n;
+	SetLastError(LastError);
+	return 0;
+}
+
+LONG NTAPI HookRtlMultiByteToUnicodeSize(PULONG BytesInUnicodeString, const CHAR* MultiByteString, ULONG BytesInMultiByteString)
+{
+	int n = BytesInMultiByteString ? OriginalMultiByteToWideChar(settings.CodePage, 0, MultiByteString, BytesInMultiByteString, NULL, 0) : 0;
+	*BytesInUnicodeString = n * sizeof(WCHAR);
+	return 0;
+}
+
+LONG NTAPI HookRtlUnicodeToMultiByteSize(PULONG BytesInMultiByteString, PCWCH UnicodeString, ULONG BytesInUnicodeString)
+{
+	int Chars = BytesInUnicodeString / sizeof(WCHAR);
+	*BytesInMultiByteString = Chars ? OriginalWideCharToMultiByte(settings.CodePage, 0, UnicodeString, Chars, NULL, 0, NULL, NULL) : 0;
+	return 0;
+}
+
+
+void AttachFunctions()
+{
+	Original.CodePage = OriginalGetACP();
+	// With the same code page these would recurse through kernelbase's CP_ACP fast path
+	if (settings.CodePage != Original.CodePage)
+	{
+		DetourAttach(&(PVOID&)OriginalRtlMultiByteToUnicodeN, HookRtlMultiByteToUnicodeN);
+		DetourAttach(&(PVOID&)OriginalRtlUnicodeToMultiByteN, HookRtlUnicodeToMultiByteN);
+		DetourAttach(&(PVOID&)OriginalRtlMultiByteToUnicodeSize, HookRtlMultiByteToUnicodeSize);
+		DetourAttach(&(PVOID&)OriginalRtlUnicodeToMultiByteSize, HookRtlUnicodeToMultiByteSize);
+	}
 	DetourAttach(&(PVOID&)OriginalGetACP, HookGetACP);
 	DetourAttach(&(PVOID&)OriginalGetOEMCP, HookGetOEMCP);
 	DetourAttach(&(PVOID&)OriginalGetConsoleCP, HookGetConsoleCP);
@@ -225,7 +307,6 @@ void AttachFunctions()
 		DetourAttach(&(PVOID&)OriginalRegisterClassExA, HookRegisterClassExA);*/
 	}
 	
-	Original.CodePage = OriginalGetACP();
 	if (settings.HookIME)
 	{
 		if (Original.CodePage == 936 && (settings.CodePage == 932 || settings.CodePage == 950))
@@ -243,6 +324,13 @@ void AttachFunctions()
 
 void DetachFunctions() 
 {
+	if (settings.CodePage != Original.CodePage)
+	{
+		DetourDetach(&(PVOID&)OriginalRtlMultiByteToUnicodeN, HookRtlMultiByteToUnicodeN);
+		DetourDetach(&(PVOID&)OriginalRtlUnicodeToMultiByteN, HookRtlUnicodeToMultiByteN);
+		DetourDetach(&(PVOID&)OriginalRtlMultiByteToUnicodeSize, HookRtlMultiByteToUnicodeSize);
+		DetourDetach(&(PVOID&)OriginalRtlUnicodeToMultiByteSize, HookRtlUnicodeToMultiByteSize);
+	}
 	DetourDetach(&(PVOID&)OriginalGetACP, HookGetACP);
 	DetourDetach(&(PVOID&)OriginalGetOEMCP, HookGetOEMCP);
 	DetourDetach(&(PVOID&)OriginalGetConsoleCP, HookGetConsoleCP);
