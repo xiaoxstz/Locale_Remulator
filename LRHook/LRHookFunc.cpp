@@ -125,6 +125,32 @@ LPSTR WideCharToMultiByteInternal(LPCWSTR wstr, UINT CodePage)
 	return lstr;
 }
 
+// Like WideCharToMultiByte with settings.CodePage, but when the buffer is too small, fills what
+// fits without splitting a double-byte character instead of failing. No terminator is added.
+int WideCharToMultiByteTruncate(LPCWSTR wstr, int wsize, LPSTR lstr, int lsize)
+{
+	int n = OriginalWideCharToMultiByte(settings.CodePage, 0, wstr, wsize, lstr, lsize, NULL, NULL);
+	if (n == 0 && lsize > 0 && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+	{
+		int Needed = OriginalWideCharToMultiByte(settings.CodePage, 0, wstr, wsize, NULL, 0, NULL, NULL);
+		LPSTR Buffer = (LPSTR)HeapAlloc(Original.hHeap, 0, Needed);
+		if (Buffer)
+		{
+			OriginalWideCharToMultiByte(settings.CodePage, 0, wstr, wsize, Buffer, Needed, NULL, NULL);
+			for (int i = 0; i < lsize; )
+			{
+				int Size = OriginalIsDBCSLeadByteEx(settings.CodePage, Buffer[i]) ? 2 : 1;
+				if (i + Size > lsize)
+					break;
+				i += Size;
+				n = i;
+			}
+			memcpy(lstr, Buffer, n);
+			HeapFree(Original.hHeap, 0, Buffer);
+		}
+	}
+	return n;
+}
 
 void AttachFunctions() 
 {

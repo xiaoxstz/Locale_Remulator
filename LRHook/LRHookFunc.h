@@ -20,6 +20,7 @@ LPVOID AllocateZeroedMemory(SIZE_T size/*eax*/);
 VOID FreeStringInternal(LPVOID pBuffer/*ecx*/);
 LPWSTR MultiByteToWideCharInternal(LPCSTR lstr, UINT CodePage = CP_ACP);
 LPSTR WideCharToMultiByteInternal(LPCWSTR wstr, UINT CodePage = CP_ACP);
+int WideCharToMultiByteTruncate(LPCWSTR wstr, int wsize, LPSTR lstr, int lsize);
 
 
 void AttachFunctions();
