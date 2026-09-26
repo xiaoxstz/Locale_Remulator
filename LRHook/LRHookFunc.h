@@ -164,6 +164,20 @@ int WINAPI HookGetWindowTextA(
 	_Out_writes_(nMaxCount) LPSTR lpString,
 	_In_ int nMaxCount);
 
+LRESULT WINAPI HookSendMessageW(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+
+int WINAPI HookGetWindowTextW(
+	_In_ HWND hWnd,
+	_Out_writes_(nMaxCount) LPWSTR lpString,
+	_In_ int nMaxCount);
+
+int WINAPI HookGetWindowTextLengthW(
+	_In_ HWND hWnd);
+
+BOOL WINAPI HookSetWindowTextW(
+	_In_ HWND hWnd,
+	_In_opt_ LPCWSTR lpString);
+
 LONG WINAPI HookImmGetCompositionStringA(
 	HIMC hIMC,
 	DWORD dwIndex,

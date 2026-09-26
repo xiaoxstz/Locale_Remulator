@@ -210,6 +210,33 @@ LONG NTAPI HookRtlUnicodeToMultiByteN(PCHAR MultiByteString, ULONG MaxBytesInMul
 	return 0;
 }
 
+// DefWindowProcA stores window text by handing the ANSI string to the kernel, which converts
+// it with the real system code page.
+typedef struct _LARGE_STRING {
+	ULONG Length;
+	ULONG MaximumLength : 31;
+	ULONG bAnsi : 1;
+	PVOID Buffer;
+} LARGE_STRING, *PLARGE_STRING;
+typedef BOOL(NTAPI* NtUserDefSetTextFn)(HWND, PLARGE_STRING);
+static NtUserDefSetTextFn OriginalNtUserDefSetText = (NtUserDefSetTextFn)DetourFindFunction("win32u.dll", "NtUserDefSetText");
+
+BOOL NTAPI HookNtUserDefSetText(HWND hWnd, PLARGE_STRING WindowText)
+{
+	if (!WindowText || !WindowText->bAnsi || !WindowText->Buffer)
+		return OriginalNtUserDefSetText(hWnd, WindowText);
+	int n = OriginalMultiByteToWideChar(settings.CodePage, 0, (LPCSTR)WindowText->Buffer, WindowText->Length, NULL, 0);
+	LPWSTR Buffer = (LPWSTR)HeapAlloc(Original.hHeap, 0, (n + 1) * sizeof(WCHAR));
+	if (!Buffer)
+		return OriginalNtUserDefSetText(hWnd, WindowText);
+	OriginalMultiByteToWideChar(settings.CodePage, 0, (LPCSTR)WindowText->Buffer, WindowText->Length, Buffer, n);
+	Buffer[n] = L'\0';
+	// Passing a Unicode LARGE_STRING to the original fails under WOW64, so go the W route
+	BOOL ret = (BOOL)DefWindowProcW(hWnd, WM_SETTEXT, 0, (LPARAM)Buffer);
+	HeapFree(Original.hHeap, 0, Buffer);
+	return ret;
+}
+
 LONG NTAPI HookRtlMultiByteToUnicodeSize(PULONG BytesInUnicodeString, const CHAR* MultiByteString, ULONG BytesInMultiByteString)
 {
 	int n = BytesInMultiByteString ? OriginalMultiByteToWideChar(settings.CodePage, 0, MultiByteString, BytesInMultiByteString, NULL, 0) : 0;
@@ -235,6 +262,7 @@ void AttachFunctions()
 		DetourAttach(&(PVOID&)OriginalRtlUnicodeToMultiByteN, HookRtlUnicodeToMultiByteN);
 		DetourAttach(&(PVOID&)OriginalRtlMultiByteToUnicodeSize, HookRtlMultiByteToUnicodeSize);
 		DetourAttach(&(PVOID&)OriginalRtlUnicodeToMultiByteSize, HookRtlUnicodeToMultiByteSize);
+		DetourAttach(&(PVOID&)OriginalNtUserDefSetText, HookNtUserDefSetText);
 	}
 	DetourAttach(&(PVOID&)OriginalGetACP, HookGetACP);
 	DetourAttach(&(PVOID&)OriginalGetOEMCP, HookGetOEMCP);
@@ -254,7 +282,7 @@ void AttachFunctions()
 	DetourAttach(&(PVOID&)OriginalWideCharToMultiByte, HookWideCharToMultiByte);
 
 	DetourAttach(&(PVOID&)OriginalCreateWindowExA, HookCreateWindowExA);
-	//DetourAttach(&(PVOID&)OriginalDefWindowProcA, HookDefWindowProcA);
+	DetourAttach(&(PVOID&)OriginalDefWindowProcA, HookDefWindowProcA);
 	DetourAttach(&(PVOID&)OriginalMessageBoxA, HookMessageBoxA);
 
 	DetourAttach(&(PVOID&)OriginalCharPrevExA, HookCharPrevExA);
@@ -279,6 +307,10 @@ void AttachFunctions()
 	
 	DetourAttach(&(PVOID&)OriginalSetWindowTextA, HookSetWindowTextA);
 	DetourAttach(&(PVOID&)OriginalGetWindowTextA, HookGetWindowTextA);
+	DetourAttach(&(PVOID&)OriginalSendMessageW, HookSendMessageW);
+	DetourAttach(&(PVOID&)OriginalGetWindowTextW, HookGetWindowTextW);
+	DetourAttach(&(PVOID&)OriginalGetWindowTextLengthW, HookGetWindowTextLengthW);
+	DetourAttach(&(PVOID&)OriginalSetWindowTextW, HookSetWindowTextW);
 	DetourAttach(&(PVOID&)OriginalDirectSoundEnumerateA, HookDirectSoundEnumerateA);
 	DetourAttach(&(PVOID&)OriginalCreateFontA, HookCreateFontA);
 	DetourAttach(&(PVOID&)OriginalCreateFontW, HookCreateFontW);
@@ -330,6 +362,7 @@ void DetachFunctions()
 		DetourDetach(&(PVOID&)OriginalRtlUnicodeToMultiByteN, HookRtlUnicodeToMultiByteN);
 		DetourDetach(&(PVOID&)OriginalRtlMultiByteToUnicodeSize, HookRtlMultiByteToUnicodeSize);
 		DetourDetach(&(PVOID&)OriginalRtlUnicodeToMultiByteSize, HookRtlUnicodeToMultiByteSize);
+		DetourDetach(&(PVOID&)OriginalNtUserDefSetText, HookNtUserDefSetText);
 	}
 	DetourDetach(&(PVOID&)OriginalGetACP, HookGetACP);
 	DetourDetach(&(PVOID&)OriginalGetOEMCP, HookGetOEMCP);
@@ -366,6 +399,10 @@ void DetachFunctions()
 
 	DetourDetach(&(PVOID&)OriginalSetWindowTextA, HookSetWindowTextA);
 	//DetourDetach(&(PVOID&)OriginalGetWindowTextA, HookGetWindowTextA);
+	DetourDetach(&(PVOID&)OriginalSendMessageW, HookSendMessageW);
+	DetourDetach(&(PVOID&)OriginalGetWindowTextW, HookGetWindowTextW);
+	DetourDetach(&(PVOID&)OriginalGetWindowTextLengthW, HookGetWindowTextLengthW);
+	DetourDetach(&(PVOID&)OriginalSetWindowTextW, HookSetWindowTextW);
 	DetourDetach(&(PVOID&)OriginalDirectSoundEnumerateA, HookDirectSoundEnumerateA);
 	DetourDetach(&(PVOID&)OriginalCreateFontA, HookCreateFontA);
 	DetourDetach(&(PVOID&)OriginalCreateFontW, HookCreateFontW);
@@ -452,6 +489,19 @@ HWND WINAPI HookCreateWindowExA(
 	{
 		FreeStringInternal((LPVOID)wstrlpWindowName);
 	}
+	// For an ANSI window proc (e.g. Delphi VCL) the kernel converted the Unicode title back to
+	// ANSI for WM_NCCREATE with the real system code page. Send the original bytes again.
+	if (ret && lpWindowName && (BYTE)lpWindowName[0] != 0xFF && !IsWindowUnicode(ret))
+	{
+		for (LPCSTR p = lpWindowName; *p; p++)
+		{
+			if ((BYTE)*p >= 0x80)
+			{
+				OriginalSendMessageA(ret, WM_SETTEXT, 0, (LPARAM)lpWindowName);
+				break;
+			}
+		}
+	}
 	return ret;
 }
 
@@ -516,6 +566,9 @@ BOOL WINAPI HookGetCPInfo(
 
 LRESULT WINAPI HookSendMessageA(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	// Converting here would make the kernel convert back to ANSI with the system code page
+	if (!IsWindowUnicode(hWnd))
+		return OriginalSendMessageA(hWnd, uMsg, wParam, lParam);
 	switch (uMsg)
 	{
 	case WM_CREATE:
@@ -784,6 +837,97 @@ int WINAPI HookGetWindowTextA(_In_ HWND hWnd, _Out_writes_(nMaxCount) LPSTR lpSt
 	int lsize = wsize ? WideCharToMultiByte(CP_ACP, 0, lpStringW, wsize, lpString, nMaxCount, NULL, NULL) : 0;
 	FreeStringInternal(lpStringW);
 	return lsize;
+}
+
+// A Unicode caller talking to an ANSI window proc (e.g. a Delphi VCL control) gets its strings
+// converted by the kernel with the real system code page, so talk to it in ANSI ourselves.
+static bool IsLocalAnsiWindow(HWND hWnd)
+{
+	DWORD pid = 0;
+	return hWnd && !IsWindowUnicode(hWnd) && GetWindowThreadProcessId(hWnd, &pid) && pid == GetCurrentProcessId();
+}
+
+// Text of an ANSI window as a zero-terminated Unicode string; free with FreeStringInternal
+static LPWSTR GetAnsiWindowTextInternal(HWND hWnd)
+{
+	LRESULT len = OriginalSendMessageA(hWnd, WM_GETTEXTLENGTH, 0, 0);
+	LPSTR lstr = (LPSTR)AllocateZeroedMemory(len > 0 ? len + 1 : 1);
+	if (!lstr)
+		return NULL;
+	if (len > 0)
+		OriginalSendMessageA(hWnd, WM_GETTEXT, len + 1, (LPARAM)lstr);
+	LPWSTR wstr = MultiByteToWideCharInternal(lstr);
+	FreeStringInternal(lstr);
+	return wstr;
+}
+
+static int CopyAnsiWindowText(HWND hWnd, LPWSTR lpString, int nMaxCount)
+{
+	if (!lpString || nMaxCount <= 0)
+		return 0;
+	lpString[0] = L'\0';
+	LPWSTR wstr = GetAnsiWindowTextInternal(hWnd);
+	if (!wstr)
+		return 0;
+	int n = min(lstrlenW(wstr), nMaxCount - 1);
+	memcpy(lpString, wstr, n * sizeof(WCHAR));
+	lpString[n] = L'\0';
+	FreeStringInternal(wstr);
+	return n;
+}
+
+static int GetAnsiWindowTextLength(HWND hWnd)
+{
+	LPWSTR wstr = GetAnsiWindowTextInternal(hWnd);
+	if (!wstr)
+		return 0;
+	int n = lstrlenW(wstr);
+	FreeStringInternal(wstr);
+	return n;
+}
+
+LRESULT WINAPI HookSendMessageW(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	if ((uMsg == WM_SETTEXT || uMsg == WM_GETTEXT || uMsg == WM_GETTEXTLENGTH) && IsLocalAnsiWindow(hWnd))
+	{
+		switch (uMsg)
+		{
+		case WM_SETTEXT:
+		{
+			LPSTR lstr = lParam ? WideCharToMultiByteInternal((LPCWSTR)lParam) : NULL;
+			LRESULT ret = OriginalSendMessageA(hWnd, uMsg, wParam, (LPARAM)lstr);
+			if (lstr)
+				FreeStringInternal(lstr);
+			return ret;
+		}
+		case WM_GETTEXT:
+			return CopyAnsiWindowText(hWnd, (LPWSTR)lParam, (int)wParam);
+		case WM_GETTEXTLENGTH:
+			return GetAnsiWindowTextLength(hWnd);
+		}
+	}
+	return OriginalSendMessageW(hWnd, uMsg, wParam, lParam);
+}
+
+int WINAPI HookGetWindowTextW(_In_ HWND hWnd, _Out_writes_(nMaxCount) LPWSTR lpString, _In_ int nMaxCount)
+{
+	if (IsLocalAnsiWindow(hWnd))
+		return CopyAnsiWindowText(hWnd, lpString, nMaxCount);
+	return OriginalGetWindowTextW(hWnd, lpString, nMaxCount);
+}
+
+int WINAPI HookGetWindowTextLengthW(_In_ HWND hWnd)
+{
+	if (IsLocalAnsiWindow(hWnd))
+		return GetAnsiWindowTextLength(hWnd);
+	return OriginalGetWindowTextLengthW(hWnd);
+}
+
+BOOL WINAPI HookSetWindowTextW(_In_ HWND hWnd, _In_opt_ LPCWSTR lpString)
+{
+	if (IsLocalAnsiWindow(hWnd))
+		return (BOOL)HookSendMessageW(hWnd, WM_SETTEXT, 0, (LPARAM)lpString);
+	return OriginalSetWindowTextW(hWnd, lpString);
 }
 
 LONG WINAPI HookImmGetCompositionStringA(
@@ -1235,10 +1379,18 @@ LRESULT CALLBACK HookDefWindowProcA(
 	_In_ LPARAM lParam
 )
 {
-	if(IsWindowUnicode(hWnd))
-		return DefWindowProcW(hWnd, Msg, wParam, lParam);
-	else
-		return OriginalDefWindowProcA(hWnd, Msg, wParam, lParam);
+	// The kernel would convert the ANSI text with the real system code page
+	if (Msg == WM_SETTEXT && lParam)
+	{
+		LPWSTR wstr = MultiByteToWideCharInternal((LPCSTR)lParam);
+		if (wstr)
+		{
+			LRESULT ret = DefWindowProcW(hWnd, Msg, wParam, (LPARAM)wstr);
+			FreeStringInternal(wstr);
+			return ret;
+		}
+	}
+	return OriginalDefWindowProcA(hWnd, Msg, wParam, lParam);
 }
 
 DWORD WINAPI HookGetTimeZoneInformation(
